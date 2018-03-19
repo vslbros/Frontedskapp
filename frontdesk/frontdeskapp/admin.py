@@ -5,6 +5,7 @@ from django.contrib import admin
 from django.contrib import messages
 from django.db import connection, transaction
 from datetime import datetime, timedelta
+import re
 import StringIO
 import csv
 from django.http import HttpResponse
@@ -27,11 +28,19 @@ MONTH = {
 
 INDIAN_PHONE_INITIAL_NUMBERS = [9, 8, 7, 6]
 
+email_id_regex = re.compile('^[_a-z0-9-]+(\.[_a-z0-9-]+)*@[a-z0-9-]+(\.[a-z0-9-]+)*(\.[a-z]{2,4})$')
+name_regex = re.compile('^([a-zA-Z]+[\s-]?)*$')
+
 class CustomerdetailsAdmin(admin.ModelAdmin):
     list_display = ['customer_name', 'no_of_adults', 'no_of_children', 'aadhar_ID', 'phone_no', 'occupation', 'email_ID', 'purpose', 'nationality']
+    search_fields = ['customer_name', 'phone_no', 'aadhar_ID']
 
     def save_model(self, request, obj, form, change):
-        old_resource_qty = 0
+        if (obj.customer_name) and (not name_regex.match(obj.customer_name)):
+            messages.set_level(request, messages.ERROR)
+            msg = 'Please enter a valid customer name. Customer Name cannot contain numbers. (Entered Customer Name is %s)' % obj.customer_name
+            messages.error(request, msg)
+            return
         if obj.phone_no:
             phone_no = str(obj.phone_no)
             if len(phone_no) != 10:
@@ -52,6 +61,11 @@ class CustomerdetailsAdmin(admin.ModelAdmin):
                 msg = 'Enter valid Adhaar No. Entered Adhaar No. is %s and consists of %s digits. Adhaar No. should have 12 Digits' % (addhard_id, len(addhard_id))
                 messages.error(request, msg)
                 return
+        if (obj.email_ID) and (not email_id_regex.match(obj.email_ID)):
+            messages.set_level(request, messages.ERROR)
+            msg = 'Enter a valid Email ID. Example: abc@xyz.com or abc@xyz.co.in (Entered email ID %s)' % obj.email_ID
+            messages.error(request, msg)
+            return
         obj.save()
 
 class RoomdetailsAdmin(admin.ModelAdmin):
@@ -118,36 +132,74 @@ class Esalary_detailsAdmin(admin.ModelAdmin):
         return object.emp_ID.employee_name
     employee_name.short_description = 'Employee Name'
 
-    def save_model(self, request, obj, form, change):
-        to_date = datetime.now()
-        from_date = datetime.now() - timedelta(days=30)
-        '''if to_date.day < 30:
-            messages.set_level(request, messages.ERROR)
-            msg = 'Salary cannot be generated before %s/%s/%s' % ('30', to_date.month, to_date.year)
-            messages.error(request, msg)
-            return'''
-
-        cursor = connection.cursor()
-        cursor.execute("SELECT id, employee_name, gross_salary from employee_details")
-        case_id_queryset = cursor.fetchall()
-        import pdb
-        pdb.set_trace()
-
-        insert_list = []
-        for (emp_id, emp_name, gross_salary,) in case_id_queryset:
-            cursor.execute("SELECT count(*) from eattendance_details where emp_ID_id=%s and leave_date BETWEEN %s and %s", (emp_id,from_date,to_date,))
-            queryset = cursor.fetchone()
-            for leave_count in queryset:
-                if leave_count:
-                    salary = ((gross_salary/30) * (30 - leave_count))
-                else:
-                    salary = gross_salary
-                insert_list.append(Esalary_details(salary=salary))
-                obj.bulk_create(insert_list)
-
 class BillingAdmin(admin.ModelAdmin):
     list_display = ['booked_room_ID', 'room_amount', 'service_amount', 'resource_amount', 'total', 'paid']
     readonly_fields = ['amount', 'room_ID', 'customer_ID']
+    actions = ['billing']
+
+    def billing(self, request, queryset):
+        queryset_list = queryset.values()
+        query_dict = queryset_list[0]
+        customer_id_value = query_dict['customer_ID_id']
+        booked_room_id_value = query_dict['booked_room_ID_id']
+        cursor = connection.cursor()
+
+        import pdb
+        pdb.set_trace()
+        cursor.execute("SELECT service_ID_id from booked_rooms where id=%s", (booked_room_id_value,))
+        queryset = cursor.fetchone()
+        (service_id_value,) = queryset
+        #(service_id_value = service_id_value
+
+        cursor.execute("SELECT resource_ID_id from booked_rooms where id=%s", (booked_room_id_value,))
+        queryset = cursor.fetchone()
+        (resource_id_value,) = queryset
+
+        service_type = '-' 
+        service_price = 0 
+        service_qty = 0
+        resource_name = '-'
+        resource_price = 0 
+        resource_qty = 0
+        if (not service_id_value) and (not resource_id_value):
+            cursor.execute("SELECT c.customer_name, rm.room_type, rm.rent, br.arrival_time, br.departure_time from booked_rooms br INNER JOIN customer_details c ON c.id=br.customer_ID_id INNER JOIN room_details rm ON rm.id=br.room_ID_id where br.customer_ID_id=%s", (customer_id_value,))
+            queryset = cursor.fetchone()
+            (customer_name, room_type, room_rent, arrival_time, departure_time) = queryset
+        elif not service_id_value:
+            cursor.execute("SELECT c.customer_name, r.resource_name, r.price, br.resource_qty, rm.room_type, rm.rent, br.arrival_time, br.departure_time from booked_rooms br  INNER JOIN resources r ON r.id=br.resource_ID_id INNER JOIN customer_details c ON c.id=br.customer_ID_id INNER JOIN room_details rm ON rm.id=br.room_ID_id where br.customer_ID_id=%s", (customer_id_value,))
+            queryset = cursor.fetchone()
+            (customer_name, resource_name, resource_price, resource_qty, room_type, room_rent, arrival_time, departure_time) = queryset
+        elif not resource_id_value:
+            cursor.execute("SELECT c.customer_name, s.service_type, s.service_price, br.service_qty, rm.room_type, rm.rent, br.arrival_time, br.departure_time from booked_rooms br  INNER JOIN service_details s ON s.id=br.service_ID_id INNER JOIN customer_details c ON c.id=br.customer_ID_id INNER JOIN room_details rm ON rm.id=br.room_ID_id where br.customer_ID_id=%s", (customer_id_value,))
+            queryset = cursor.fetchone()
+            (customer_name, service_type, service_price, service_qty, room_type, room_rent, arrival_time, departure_time) = queryset
+        else:
+            cursor.execute("SELECT c.customer_name, r.resource_name, r.price, s.service_type, s.service_price, br.service_qty, br.resource_qty, rm.room_type, rm.rent, br.arrival_time, br.departure_time from booked_rooms br INNER JOIN resources r ON r.id=br.resource_ID_id INNER JOIN service_details s ON s.id=br.service_ID_id INNER JOIN customer_details c ON c.id=br.customer_ID_id INNER JOIN room_details rm ON rm.id=br.room_ID_id where br.customer_ID_id=%s", (customer_id_value,))
+            queryset = cursor.fetchone()
+            (customer_name, resource_name, resource_price, service_type, service_price, service_qty, resource_qty, room_type, room_rent, arrival_time, departure_time) = queryset
+        
+        file_name = 'Biling_%s' % (customer_name)
+        f = StringIO.StringIO()
+        writer = csv.writer(f)
+        writer.writerow(['Customer Name', 'Arrival Time', 'Departure Time', 'Room', 'Room Price', 'Resource', 'Resource Quantity', 'Resource Price', 'Service', 'Service Quantity', 'Service Price', 'CGST', 'CGST Price', 'SGST', 'SGST Price', 'Total Amount'])
+
+        calculate_resource_price = int(resource_price) * int(resource_qty)
+        calculate_service_price = int(service_price) * int(service_qty)
+        arrival_time = arrival_time.strftime('%d/%m/%Y')
+        departure_time = departure_time.strftime('%d/%m/%Y')
+
+        total_amount = room_rent + calculate_resource_price + calculate_service_price
+        gst = 0
+        if total_amount > 1000:
+            gst = (total_amount/100) * 6
+            total_amount = total_amount + (gst * 2)
+        writer.writerow([customer_name, arrival_time, departure_time, room_type, room_rent, resource_name, resource_qty, calculate_resource_price, service_type, service_qty, calculate_service_price, '6%', gst, '6%', gst, total_amount])
+        f.seek(0)
+        response = HttpResponse(f, content_type='text/csv')
+        response_cd = 'attachment; filename=%s.csv' % file_name
+        response['Content-Disposition'] = response_cd
+        return response
+    billing.short_description = "Print Bill"
 
     def resource_amount(self, object):
         if object.booked_room_ID.service_ID:
@@ -270,6 +322,14 @@ class BookedroomsAdmin(admin.ModelAdmin):
             if selected_date.date() < today.date():
                 messages.set_level(request, messages.ERROR)
                 msg = 'Past date cannot be set as Arrival Date. Selected date is %s, Todays Date is %s' % (selected_date.strftime('%d/%m/%Y'), today.strftime('%d/%m/%Y'))
+                messages.error(request, msg)
+                return
+        if obj.departure_time:
+            arrival_date = obj.arrival_time
+            departure_date = obj.departure_time
+            if departure_date.date() <= arrival_date.date():
+                messages.set_level(request, messages.ERROR)
+                msg = 'Departure date cannot be less than or equal to Arrival Date. Departure date selected is %s, Arrival Date selected is %s' % (departure_date.strftime('%d/%m/%Y'), arrival_date.strftime('%d/%m/%Y'))
                 messages.error(request, msg)
                 return
         if obj.booking_unique_no:
